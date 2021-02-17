@@ -492,7 +492,7 @@ function civicrm_group_nodes_batch_init() {
   );
 
   // Find all contact IDs in CiviCRM groups that should have published nodes.
-  //
+
   // Get all groups from config.
   $group_ids = civicrm_group_nodes_get_groups();
   $processed_groups = array();
@@ -508,10 +508,33 @@ function civicrm_group_nodes_batch_init() {
     }
     $processed_groups[$group_id] = TRUE;
   }
+
+  // Find out if any contacts have been removed from groups but still have 
+  // published nodes.
+  
+  // Get all contact IDs from published nodes.
+  $content_types = civicrm_group_nodes_get_content_types();
+  foreach ($content_types as $content_type) {
+    $query = db_select('node', 'n');
+    $query->join('field_data_civicrm_group_nodes_contact_ref', 'civicontact', 'civicontact.entity_id = n.nid');
+    $query->fields('civicontact',array('civicrm_group_nodes_contact_ref_contact_id'))
+      ->condition('n.type', $content_type,'=')
+      ->condition('n.status', 1,'=')
+      ->condition('civicontact.entity_type', 'node','=')
+      ->condition('civicontact.bundle', $content_type,'=')
+      ->condition('civicontact.civicrm_group_nodes_contact_ref_contact_id', 0,'>')
+      ->orderBy('created', 'DESC');
+    $results = $query->execute();
+    foreach ($results as $result) {
+      $contacts[$result->civicrm_group_nodes_contact_ref_contact_id] = $result->civicrm_group_nodes_contact_ref_contact_id;
+    }
+  }
+  
   foreach ($contacts as $contact_id) {
     // Add an operation to create a node for this contact
     $batch['operations'][] = array('civicrm_group_nodes_batch_worker', array($contact_id));
   }
+
   batch_set($batch);
   batch_process('admin/config/civicrm/civicrm_group_nodes');
 }
