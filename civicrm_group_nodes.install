@@ -1,49 +1,29 @@
 <?php
 
 /* @file
- * A simple module to synchronize Backdrop Nodes with specified CiviCRM Groups.
+ * A simple module to synchronize Backdrop Nodes with contacts in 
+ * specified CiviCRM Groups.
  */
 
 /**
  * Implements hook_install().
  */
 function civicrm_group_nodes_install() {
+  $field = array(
+    'field_name'    => 'civicrm_group_nodes_contact_ref',
+    'type'          => 'civicrm_contact_ref_contact',
+    'cardinality'   => 1,
+    'locked'        => 1,
+  );
+  field_create_field($field);
   $t = get_t();
   $here = l($t('here'), 'admin/config/civicrm/civicrm_group_nodes/add_rule');
-  backdrop_set_message($t('CiviGroup Nodes Sync installed. You will need to specify sync rules !1.', array('!1' => $here)));
+  backdrop_set_message($t('CiviCRM Group Nodes Sync has been installed. You will need to specify sync rules !1.', array('!1' => $here)));
 }
 
 /**
- * Implements hook_enable().
+ * Implements hook_uninstall().
  */
-function civicrm_group_nodes_enable() {
-  db_query("UPDATE {system} SET weight = 110 WHERE name = 'civicrm_group_nodes'");
-}
-
-/**
- * Implements hook_schema().
- */
-function civicrm_group_nodes_schema() {
-  $schema['civicrm_group_nodes_rules'] = array(
-    'fields' => array(
-      'id' => array(
-        'type' => 'serial',
-        'not null' => TRUE,
-      ),
-      'role_name' => array(
-        'type' => 'varchar',
-        'length' => 64,
-        'not null' => TRUE,
-        'default' => '',
-      ),
-      'group_id' => array(
-        'type' => 'int',
-        'unsigned' => TRUE,
-        'not null' => TRUE,
-      ),
-    ),
-    'primary key' => array('id'),
-  );
-
-  return $schema;
+function civicrm_group_nodes_uninstall() {
+  field_delete_field('civicrm_group_nodes_contact_ref');
 }

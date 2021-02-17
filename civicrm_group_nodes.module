@@ -4,11 +4,15 @@
  * @file
  * A simple module that syncs contacts in a group to Backdrop nodes.
  */
-
+ 
 /**
  * Implements hook_config_info().
  */
 function civicrm_group_nodes_config_info() {
+  $prefixes['civicrm_group_nodes.rules'] = array(
+    'label' => t('CiviCRM Group Nodes rules'),
+    'group' => t('CiviCRM'),
+  );
   $prefixes['civicrm_group_nodes.settings'] = array(
     'label' => t('CiviCRM Group Nodes settings'),
     'group' => t('CiviCRM'),
@@ -17,134 +21,151 @@ function civicrm_group_nodes_config_info() {
 }
 
 /**
- * Implements hook_user_insert().
- *
- * When a new user is created, add them to Civi groups depending on their
- * assigned roles.
+ * Implements hook_preset_types().
  */
-function civicrm_group_nodes_user_insert($account) {
-  if (!civicrm_initialize()) {
-    return;
-  }
-  civicrm_group_nodes_add_groups_oncreate($account, $account->roles);
+function civicrm_group_nodes_preset_types() {
+  return array(
+    'rules' => array(
+      'name' => 'CiviCRM Group Nodes Rule',
+      'path' => 'admin/config/civicrm/civicrm_group_nodes',
+      'path_title' => 'CiviCRM Group Nodes',
+      'path_description' => 'Configure rules for syncing CiviCRM Group Nodes.',
+      'id_name' => 'Name',
+      'columns' => array(
+        'group' => 'Group',
+        'content_type' => 'Content type',
+      ),
+    ),
+  );
 }
 
 /**
- * Implements hook_user_update().
- *
- * When a user is updated, add/remove them from Civi groups according to their
- * roles.
+ * Implements hook_preset_form().
  */
-function civicrm_group_nodes_user_update($account) {
-  if (!civicrm_initialize()) {
-    return;
-  }
-  $roles = array_diff($account->roles, array(BACKDROP_ANONYMOUS_ROLE, BACKDROP_AUTHENTICATED_ROLE));
+function civicrm_group_nodes_preset_form($preset_type, $id) {
+ $form = array();
+ $config = config('civicrm_group_nodes.' . $preset_type);
 
-  if ($roles) {
-    civicrm_group_nodes_add_remove_groups($account, $roles, 'add');
+ // Get default values.
+ $config_values = ($id) ? $config->get($id) : array();
+
+ // Get CiviCRM groups as options for checkboxes.
+ $group_options = array();
+ civicrm_initialize();
+ $result = civicrm_api3('Group', 'get', [
+  'sequential' => 1,
+  'options' => ['limit' => 0],
+ ]);
+ foreach ($result['values'] as $group) {
+   $group_options[$group['id']] = $group['title'];
+ }
+ 
+ if ($preset_type == 'rules') {
+   $form['group'] = array(
+     '#type' => 'select',
+     '#title' => t('CiviCRM Groups'),
+     '#description' => t('Select the CiviCRM group you would like to sync.'),
+     '#options' => $group_options,
+     '#default_value' => isset($config_values['group']) ? $config_values['group'] : array(),
+     '#required' => TRUE,
+   );
+   $form['content_type'] = array(
+     '#type' => 'select',
+     '#title' => t('Content type'),
+     '#description' => t('Select the content type you would like to sync. If needed, we will create a field to reference the CiviCRM contact.'),
+     '#options' => node_type_get_names(),
+     '#default_value' => isset($config_values['content_type']) ? $config_values['content_type'] : array(),
+     '#required' => TRUE,
+   );
+ }
+ $form['#submit'][] = 'civicrm_group_nodes_rules_submit';
+
+ return $form;
+}
+
+/**
+ * Form submission handler for civicrm_group_nodes_preset_form() for sync rules.
+ *
+ * Used to make sure the content type has a CiviCRM Contact Reference field
+ * that we can use (and if not, to create one).
+ */
+
+function civicrm_group_nodes_rules_submit($form, &$form_state) {
+  $content_type = $form_state['values']['content_type'];
+  $content_type_fields = field_info_instances('node', $content_type);
+  $contact_ref_field_instance_exists = FALSE;
+  foreach ($content_type_fields as $field) {
+    if ($field['field_name'] == 'civicrm_group_nodes_contact_ref' && $field['widget']['type'] == 'civicrm_contact_ref_autocomplete') {
+      $contact_ref_field_instance_exists = TRUE;
+      break;
+    }
+  }
+  $t = get_t();
+  if (!$contact_ref_field_instance_exists) {
+    $instance = array(
+      'entity_type'  => 'node',
+      'bundle'       => $content_type,
+      'field_name'   => 'civicrm_group_nodes_contact_ref',
+      'label'        => $t('CiviCRM Contact'),
+      'required'     => TRUE,
+      'locked'     => TRUE,
+      'widget'       => array(
+          'type'  => 'civicrm_contact_ref_autocomplete',
+      ),
+    );
+    field_create_instance($instance);
   }
 }
 
 /**
- * Implements hook_user_login().
+ * Implements hook_node_insert().
  *
- * When a user logs in, update their roles depending on which Civi groups they
- * are a member of.
+ * When a new node is created, add them to CiviCRM groups depending on rules.
  */
-function civicrm_group_nodes_user_login(&$edit, $account) {
-  civicrm_group_nodes_sync_roles($account);
+function civicrm_group_nodes_node_insert($node) {
+  civicrm_group_nodes_node_update($node);
 }
 
 /**
- * Helper function to add a user to Civi groups depending on their roles, when
- * the user is first created
+ * Implements hook_node_update().
+ *
+ * When a node is updated, add/remove them from CiviCRM groups according to rules.
  */
-function civicrm_group_nodes_add_groups_oncreate($account, $roles) {
+function civicrm_group_nodes_node_update($node) {
   if (!civicrm_initialize()) {
     return;
   }
-
-  require_once 'CRM/Core/BAO/UFMatch.php';
-  $contactId = CRM_Core_BAO_UFMatch::getContactId($account->uid);
-
-  if (!$contactId) {
-    return;
-  }
-
-  $result = db_select('civicrm_group_nodes_rules', 'cgr')->fields('cgr', array('group_id'))->condition('role_name', array_keys($roles))->execute()->fetchAll();
-  $groups = _civicrm_group_nodes_validate_groups($result);
-  foreach ($groups as $group) {
-    $groupContact = new CRM_Contact_DAO_GroupContact();
-    $groupContact->group_id = $group->group_id;
-    $groupContact->contact_id = $contactId;
-
-    if (!$groupContact->find(TRUE)) {
-      // add the contact to group
-      $historyParams = array(
-        'contact_id' => $contactId,
-        'group_id' => $group->group_id,
-        'method' => 'API',
-        'status' => 'Added',
-        'date' => date('YmdHis'),
-        'tracking' => NULL,
-      );
-      CRM_Contact_BAO_SubscriptionHistory::create($historyParams);
-      $groupContact->status = 'Added';
-      $groupContact->save();
+  $groups = civicrm_group_nodes_get_groups($node->type, TRUE);
+  if (count($groups)) {
+    $contact_id = field_get_value($node, 'civicrm_group_nodes_contact_ref', 'contact_id');
+    if ($contact_id) {
+      if ($node->status) {
+        // Add to group if node was published.
+        civicrm_group_nodes_adjust_contact_groups($contact_id, $groups, 'add');
+      }
+      else {
+        // Remove from group if node was unpublished.
+        civicrm_group_nodes_adjust_contact_groups($contact_id, $groups, 'remove');
+      }
     }
   }
 }
 
 /**
- * Implements hook_form_alter().
+ * Implements hook_node_delete().
  *
- * The updates CiviCRM when Backdrop roles are changed
+ * When a node is deleted, remove the contact from CiviCRM groups according to rules.
  */
-function civicrm_group_nodes_form_alter(&$form, &$form_state, $form_id) {
-  // append this to change user edit submit function
-  if (($form['#id'] == 'user-profile-form' && isset($form['#user']) && (module_exists('content_profile') ||
-    isset($form['account']))) || $form['#id'] == 'user-edit-form') {
-    $uid = $form['#user']->uid;
-    if (!$uid) {
-      return;
-    }
-    // make sure there is a civicrm record
-    civicrm_initialize(TRUE);
-    require_once 'CRM/Core/BAO/UFMatch.php';
-    $contact_id = CRM_Core_BAO_UFMatch::getContactId($uid);
-    if (!$contact_id) {
-      return;
-    }
-    array_unshift($form['#submit'], '_civicrm_group_update');
-  }
-}
-
-/**
- * Helper function to remove Groups when Backdrop user form is saved, if a role
- * is removed in Backdrop.
- */
-function _civicrm_group_update($form, $form_values) {
-  //note the Backdrop form calls this function directly so CiviCRM needs to be initialised
+function civicrm_group_nodes_node_delete($node) {
   if (!civicrm_initialize()) {
     return;
   }
-  $uid = $form['#user']->uid;
-  $account = user_load($uid);
-  //load the currently saved roles
-  $roles = $account->roles;
-  //get the roles as submitted on the user form
-  if (!is_array($form_values['values']['roles'])) {
-    return;
-  }
-  $new_roles = array_filter($form_values['values']['roles']);
-
-  // if there is a difference then something was removed
-  $removed_roles = array_diff_key($roles, $new_roles);
-
-  // now delete the corresponding group from the record in CiviCRM (if there is a corresponding group)
-  if ($removed_roles) {
-    civicrm_group_nodes_add_remove_groups($account, $removed_roles, 'remove');
+  $groups = civicrm_group_nodes_get_groups($node->type, TRUE);
+  if (count($groups)) {
+    $contact_id = field_get_value($node, 'civicrm_group_nodes_contact_ref', 'contact_id');
+    if ($contact_id) {
+      civicrm_group_nodes_adjust_contact_groups($contact_id, $groups, 'remove');
+    }
   }
 }
 
@@ -164,140 +185,182 @@ function civicrm_group_nodes_civicrm_post($op, $objectName, $objectId, &$objectR
 
   $group_id = $objectId;
 
-  //Do we have any Role sync rules for this group?
-  $groupRoles = db_select('civicrm_group_nodes_rules', 'cgr')->fields('cgr', array('role_name'))->condition('group_id', $group_id)->execute()->fetchAll();
+  // Do we have any Content type sync rules for this Group?
+  $content_types = civicrm_group_nodes_get_content_types($group_id);
 
-  $rolesProcessed = array();
-  foreach ($groupRoles as $groupRole) {
-    $role_name = $groupRole->role_name;
+  $rulesProcessed = array();
+  foreach ($content_types as $content_type) {
     foreach ($objectRef as $contact_id) {
-      if (isset($rolesProcessed[$role_name])) {
-        continue;
-      }
-
-      //Do we have a Backdrop Account?
-      require_once 'CRM/Core/BAO/UFMatch.php';
-      $uid = CRM_Core_BAO_UFMatch::getUFId($contact_id);
-      // make sure we have an actual user account
-      if (!$uid) {
+      if (isset($rulesProcessed[$content_type])) {
         continue;
       }
 
       switch ($op) {
         case 'create':
-          // Contact added to group; add to corresponding role
-          $rolesProcessed[$role_name] = $role_name;
-          civicrm_group_nodes_add_role($uid, $role_name);
+          // Contact added to group; add a node.
+          $rulesProcessed[$content_type] = $content_type;
+          civicrm_group_nodes_add_node($contact_id, $content_type);
           break;
 
-        // "edit" denotes both rejoining or being deleted from a group,
-        // need to check which to perform appropriate action
         case 'edit':
-          $rolesProcessed[$role_name] = $role_name;
-          // Ideally would use GroupContact API with group_id as a parameter, currently broken (amend once bug fixed):
-          // http://issues.civicrm.org/jira/browse/CRM-10331?page=com.atlassian.jira.plugin.system.issuetabpanels:all-tabpanel
-          $contact_groups = civicrm_api('GroupContact', 'get', array(version => '3', 'contact_id' => $contact_id));
-          $in_group = FALSE;
-          foreach ($contact_groups['values'] as $group_row) {
-            if ($group_row['group_id'] == $group_id) {
-              $in_group = TRUE;
-              break;
-            }
-          }
-
-          if ($in_group) {
-            // Contact rejoined the group; add to corresponding role
-            civicrm_group_nodes_add_role($uid, $role_name);
+          // "Edit" denotes both rejoining or being deleted from a group,
+          // need to check which to perform appropriate action.
+          $rulesProcessed[$content_type] = $content_type;
+          $groups = civicrm_api3('GroupContact', 'get', [
+            'sequential' => 1,
+            'contact_id' => $contact_id,
+            'group_id' => $group_id,
+          ]);
+          if ($groups['count'] > 0) {
+            // Contact rejoined the group; recreate or publish node.
+            civicrm_group_nodes_add_node($contact_id, $content_type);
           }
           else {
-            // Contact no longer belongs to group, remove corresponding role,
-            // but only if the contact is in no other groups that grant this role
-            if (!civicrm_role_granted_by_other_group($contact_id, $role_name, $group_id)) {
-              civicrm_group_nodes_del_role($uid, $role_name);
+            // Contact no longer belongs to group, unpublish corresponding node,
+            // but only if the contact is in no other groups that grant this node
+            if (!civicrm_node_granted_by_other_group($contact_id, $content_type, $group_id)) {
+              civicrm_group_nodes_unpub_node($contact_id, $content_type);
             }
           }
           break;
 
         case 'delete':
-          $rolesProcessed[$role_name] = $role_name;
-          //Contact is removed from group.
-          //Remove the role, but only if the contact is in no other groups that grant this role
-          if (!civicrm_role_granted_by_other_group($contact_id, $role_name, $group_id)) {
-            civicrm_group_nodes_del_role($uid, $role_name);
+          $rulesProcessed[$content_type] = $content_type;
+          // Contact is removed from group.
+          // Unpublish the node, but only if the contact is in no other groups that grant this node.
+          if (!civicrm_node_granted_by_other_group($contact_id, $content_type, $group_id)) {
+            civicrm_group_nodes_unpub_node($contact_id, $content_type);
           }
           break;
       }
-      //end switch
     }
-    //end foreach
   }
-  //end while
 }
 
 /**
- * Helper function to add a role to a given user
+ * Helper function to add or publish a node for a given contact
  *
- * @param int $uid The user id of the account to modify
- * @param string $role_name The role name being added
+ * @param int $contact_id The CiviCRM id of the contact to modify
+ * @param string $content_type The content type being added
  */
-function civicrm_group_nodes_add_role($uid, $role_name) {
-  $account = user_load((int) $uid, TRUE);
-
-  // Skip adding the role to the user if they already have it.
-  if ($account !== FALSE && !in_array($role_name, $account->roles)) {
-    $account->roles = $account->roles + array($role_name);
-    $account->save();
+function civicrm_group_nodes_add_node($contact_id, $content_type) {
+  $node = civicrm_group_nodes_get_node($contact_id, $content_type);
+  if (!$node) {
+    // No node exists -- create and publish a node.
+    if (!civicrm_initialize()) {
+      return;
+    }
+    $node = entity_create('node', array(
+      'type' => $content_type,
+      'uid' => 1,
+      'status' => 1,
+      'comment' => 1,
+      'promote' => 0,
+    ));
+    $nodewrapper = entity_metadata_wrapper('node', $node);
+    $contact = civicrm_api3('Contact', 'get', [
+      'sequential' => 1,
+      'return' => ["display_name"],
+      'id' => $contact_id,
+    ]);
+    if (!$contact['is_error'] && $contact['count'] == 1) {
+      $nodewrapper->title->set($contact['values'][0]['display_name']);
+      $nodewrapper->civicrm_group_nodes_contact_ref->set($contact_id);
+      $nodewrapper->save();
+    }
+  } else {
+    // Publish this node if necessary.
+    if (!$node->status) {
+      $node->status = 1;
+      $node->save();
+    }
   }
 }
 
 /**
- * Helper function to remove a role from a given user
+ * Helper function to unpublish a node for a given contact
  *
- * @param $uid The user id of the account to modify
- * @param $role_name The role name being removd
+ * @param $contact_id The contact id of the node to modify
+ * @param $content_type The content type of the node being removed
  */
-function civicrm_group_nodes_del_role($uid, $role_name) {
-  $account = user_load((int) $uid);
-  // Skip removing the role from the user if they don't have it.
-  if ($account !== FALSE && in_array($role_name, $account->roles)) {
-    $account->roles = array_diff($account->roles, array($role_name));
-    $account->save();
+function civicrm_group_nodes_unpub_node($contact_id, $content_type) {
+  $node = civicrm_group_nodes_get_node($contact_id, $content_type);
+  if (!$node) {
+    // Skip unpublishing the node for the contact if they don't have one.
+    return;
+  } else {
+    // Unpublish this node.
+    if ($node->status) {
+      $node->status = 0;
+      $node->save();
+    }
   }
 }
 
+
 /**
- * Count the groups this contact is in which grant this role
+ * Helper function to retrieve a node for a given contact and content type.
+ * Returns a node object or FALSE if no node exists.
+ *
+ * @param $contact_id The contact id of the node to modify
+ * @param $content_type The content type of the node being removed
  */
-function civicrm_role_granted_by_other_group($contact_id, $rid, $group_id) {
+function civicrm_group_nodes_get_node($contact_id, $content_type) {
+  // Check if a node exists for this contact and content type.
+  $query = db_select('node', 'n');
+  $query->join('field_data_civicrm_group_nodes_contact_ref', 'civicontact', 'civicontact.entity_id = n.nid');
+  $query->fields('n',array('title','nid'))
+    ->condition('n.type', $content_type,'=')
+    ->condition('civicontact.entity_type', 'node','=')
+    ->condition('civicontact.bundle', $content_type,'=')
+    ->condition('civicontact.civicrm_group_nodes_contact_ref_contact_id', $contact_id,'=')
+    ->orderBy('created', 'DESC')
+    ->range(0,1);
+    $results = $query->execute();
+    
+    foreach ($results as $result) {
+      if ($result) {
+        return node_load($result->nid);
+      }
+      else {
+        return NULL;
+      }
+    }
+}
+
+/**
+ * Count the groups this contact is in which grant this node type.
+ */
+function civicrm_node_granted_by_other_group($contact_id, $content_type, $group_id) {
   if (!civicrm_initialize()) {
     return;
   }
 
-  //get all the groups this contact belongs to
-  $params = array('version' => 3, 'contact_id' => $contact_id);
-  $result = civicrm_api('group_contact', 'get', $params);
-
-  if (civicrm_error($result)) {
+  // Get all the groups this contact belongs to.
+  $result = civicrm_api3('GroupContact', 'get', [
+    'sequential' => 1,
+    'contact_id' => $contact_id,
+  ]);
+  // If there was an error, don't do anything destructive.
+  if ($result['is_error']) {
     return TRUE;
   }
   else {
-    //contact is not in *any* other groups so delete the role
-    if (count($result) == 0) {
+    if ($result['count'] == 0) {
+      // Contact is not in *any* other groups so unpublish the node.
       return FALSE;
     }
-    //contact is in some groups, determine if any of them grant this role
     else {
-      // check if group has been added by api or not.
-      $groupIds = array();
-      foreach ($result as $grpid => $grp) {
-        $groupIds[] = CRM_Utils_Array::value('group_id', $grp);
+      // Contact is in some groups, determine if any of them grant this node type.
+      $rule_groups = civicrm_group_nodes_get_groups($content_type);
+      foreach ($result['values'] as $contact_group_id => $contact_group) {
+        if (in_array($contact_group_id, $rule_groups)) {
+          return TRUE;
+        }
       }
     }
-
-    $groupRules = db_query('SELECT COUNT(*) FROM {civicrm_group_nodes_rules} WHERE group_id IN ( :group_ids ) ', array(':group_ids' => implode(",", $groupIds)))->fetchField();
-
-    return ($groupRules > 0);
   }
+  return FALSE;
 }
 
 /**
@@ -305,42 +368,12 @@ function civicrm_role_granted_by_other_group($contact_id, $rid, $group_id) {
  */
 function civicrm_group_nodes_menu() {
   $items = array();
-  $items['admin/config/civicrm/civicrm_group_nodes'] = array(
-    'title' => 'CiviGroup Roles Sync',
-    'description' => 'Add/remove association rules and configure settings. Also perform manual synchronization.',
-    'page callback' => 'civicrm_group_nodes_show_rules',
-    'access callback' => 'user_access',
-    'access arguments' => array('access civicrm group role setting'),
-    'type' => MENU_NORMAL_ITEM,
-  );
-  $items['admin/config/civicrm/civicrm_group_nodes/show_rules'] = array(
-    'title' => 'Association rules',
-    'access callback' => 'user_access',
-    'access arguments' => array('access civicrm group role setting'),
-    'weight' => -5,
-    'type' => MENU_DEFAULT_LOCAL_TASK,
-  );
-  $items['admin/config/civicrm/civicrm_group_nodes/add_rule'] = array(
-    'title' => 'Add association rule',
-    'page callback' => 'backdrop_get_form',
-    'page arguments' => array('civicrm_group_nodes_add_rule_form'),
-    'access callback' => 'user_access',
-    'access arguments' => array('access civicrm group role setting'),
-    'type' => MENU_LOCAL_ACTION,
-  );
-  $items['admin/config/civicrm/civicrm_group_nodes/add_rule/%rule_id'] = array(
-    'title' => 'Edit association rule',
-    'page callback' => 'backdrop_get_form',
-    'page arguments' => array('civicrm_group_nodes_add_rule_form', 1),
-    'access callback' => 'user_access',
-    'access arguments' => array('access civicrm group role setting'),
-  );
   $items['admin/config/civicrm/civicrm_group_nodes/manual_sync'] = array(
     'title' => 'Manually synchronize',
     'page callback' => 'backdrop_get_form',
     'page arguments' => array('civicrm_group_nodes_manual_sync'),
     'access callback' => 'user_access',
-    'access arguments' => array('access civicrm group role setting'),
+    'access arguments' => array('access civicrm group node setting'),
     'type' => MENU_LOCAL_TASK,
   );
   $items['admin/config/civicrm/civicrm_group_nodes/settings'] = array(
@@ -348,7 +381,7 @@ function civicrm_group_nodes_menu() {
     'page callback' => 'backdrop_get_form',
     'page arguments' => array('civicrm_group_nodes_settings'),
     'access callback' => 'user_access',
-    'access arguments' => array('access civicrm group role setting'),
+    'access arguments' => array('access civicrm group node setting'),
     'type' => MENU_LOCAL_TASK,
   );
   return $items;
@@ -359,286 +392,55 @@ function civicrm_group_nodes_menu() {
  */
 function civicrm_group_nodes_permission() {
   return array(
-    'access civicrm group role setting' => array(
-      'title' => t('Access CiviCRM group role setting'),
-      'description' => t('Access Civicrm group roles synchronization.'),
+    'access civicrm group node setting' => array(
+      'title' => t('Access CiviCRM group node setting'),
+      'description' => t('Access Civicrm group nodes synchronization.'),
     ),
   );
 }
 
 /**
- * Show stored association rules and delete rules.
- */
-function civicrm_group_nodes_show_rules($action = NULL, $id = NULL) {
-  if (!civicrm_initialize()) {
-    return;
-  }
-
-  if ($action == 'delete') {
-    if (is_numeric($id)) {
-
-      $delete = db_delete('civicrm_group_nodes_rules')->condition('id', $id)->execute();
-      if ($delete) {
-        backdrop_set_message(t('Rule ID !1 was successfully deleted.', array('!1' => $id)));
-      }
-      else {
-        backdrop_set_message(t('There was an error deleting the association rule. Please check your database settings and try again. If you continue to get this error message then try to reinstall CiviGroup Roles Sync.'), $type = 'error');
-      }
-    }
-  }
-
-  // get Backdrop roles
-  $roles = user_roles(TRUE);
-
-  // get civicrm groups
-  $params = array('version' => 3, 'option.limit' => 0);
-  $groups = civicrm_api('group', 'get', $params);
-  $groups = CRM_Utils_Array::value('values', $groups);
-
-  //Begin building main output table.
-  $header = array('rid' => t('Rule ID'), 'name' => t("Rule Name ('CiviCRM Group' <--> 'Backdrop Role')"), 'op' => t('Operations'));
-  $data = array();
-
-  $rules = db_query('SELECT * FROM {civicrm_group_nodes_rules} ORDER BY id ASC')->fetchAll();
-  foreach ($rules as $result) {
-    $gid = CRM_Utils_Array::value($result->group_id, $groups);
-    $data[] = array(
-      'rid' => check_plain($result->id),
-      'name' => check_plain(CRM_Utils_Array::value('title', $gid) . " <--> " . $roles[$result->role_name]),
-      'op' => l(t('edit'), 'admin/config/civicrm/civicrm_group_nodes/add_rule' . '/' . check_plain($result->id)) . '&nbsp;&nbsp;' . l(t('delete'), 'admin/config/civicrm/civicrm_group_nodes/delete' . '/' . check_plain($result->id)),
-    );
-  }
-
-  if (!empty($data)) {
-    $output['data'] = array(
-      '#theme' => 'table',
-      '#header' => $header,
-      '#rows' => $data,
-    );
-  }
-  else {
-    $output = t('There are no rules currently set.');
-  }
-
-  return $output;
-}
-
-/**
- * Implements hook_form().
+ * Helper function to add or remove a specific CiviCRM contact from groups. 
  *
- * Add/edit association rules.
- *
- * @ingroup forms
- * @see civicrm_group_nodes_add_rule_validate()
- * @see civicrm_group_nodes_add_rule_submit()
- */
-function civicrm_group_nodes_add_rule_form($form, $form_state = array(), $edit_id = NULL) {
-  if (!civicrm_initialize()) {
-    return;
-  }
-
-  // retrieve Backdrop roles
-  $roles = user_roles(TRUE);
-
-  // get civicrm groups
-  require_once "CRM/Core/PseudoConstant.php";
-  $groups = CRM_Core_PseudoConstant::group();
-
-  //Let's get rid of the authenticated role as it is a useless option for this module
-  unset($roles['authenticated']);
-
-  //Begin add form
-  $form = array();
-  $form['add_rule'] = array(
-    '#type' => 'fieldset',
-    '#title' => t('Association Rule'),
-    '#description' => t('Choose a CiviCRM Group and a Backdrop Role below.'),
-    '#tree' => TRUE,
-    '#parents' => array('add_rule'),
-  );
-  $form['add_rule']['select_group'] = array(
-    '#type' => 'select',
-    '#title' => t('CiviCRM Group'),
-    '#options' => $groups,
-    '#required' => TRUE,
-  );
-  $form['add_rule']['select_role'] = array(
-    '#type' => 'select',
-    '#title' => t('Backdrop Role'),
-    '#options' => $roles,
-    '#required' => TRUE,
-  );
-  $form['submit'] = array(
-    '#type' => 'submit',
-    '#value' => t('Add association rule'),
-  );
-
-  //Begin edit form
-  if (!empty($edit_id) && is_numeric($edit_id)) {
-    $default_values = db_select('civicrm_group_nodes_rules', 'cgr')->fields('cgr')->condition('id', $edit_id)->execute()->fetchObject();
-    if (!$default_values) {
-      backdrop_set_message(t('There was an error in obtaining the association rule for edit. Please check your database settings and try again. If you continue to get this error message then try to reinstall CiviGroup Roles Sync.'));
-      return $form;
-    }
-
-    //Alter above add form with default values.
-    $form['add_rule']['select_group']['#default_value'] = check_plain($default_values->group_id);
-    $form['add_rule']['select_role']['#default_value'] = check_plain($default_values->role_name);
-    $form['edit_flag'] = array('#type' => 'hidden', '#value' => check_plain($edit_id));
-    $form['submit']['#value'] = t('Save changes');
-  }
-
-  return $form;
-}
-
-/**
- * Implements hook_validate().
- *
- * for the add/edit rule form.
- */
-function civicrm_group_nodes_add_rule_form_validate($form, &$form_state) {
-
-  //Make sure there is a CiviMember Membership Type and a Backdrop Role selected.
-  if (is_numeric($form_state['values']['add_rule']['select_group']) && isset($form_state['values']['add_rule']['select_role'])) {
-    if ($form_state['values']['add_rule']['select_group'] == 0 || $form_state['values']['add_rule']['select_role'] == '') {
-      form_set_error('add_rule', t('You must select both a CiviCRM Group and a Backdrop Role from the "Association Rule" section.'));
-    }
-  }
-  else {
-    form_set_error('add_rule', t('Please select CiviCRM Group and Backdrop Role.'));
-  }
-
-  //Validate edit flag if set
-  if (isset($form_state['values']['edit_flag']) && !is_numeric($form_state['values']['edit_flag'])) {
-    for_set_error('', t('Edit flag was not numeric.'));
-  }
-}
-
-/**
- * Implements hook_submit().
- *
- * For the add/edit rule form.
- */
-function civicrm_group_nodes_add_rule_form_submit($form, &$form_state) {
-  if (!civicrm_initialize()) {
-    return;
-  }
-  //If edit_flag is set then process as an edit form, if not then process as an add form.
-  if (isset($form_state['values']['edit_flag'])) {
-    $edit_rule = db_update('civicrm_group_nodes_rules')
-      ->fields(array(
-        'role_name' => $form_state['values']['add_rule']['select_role'],
-        'group_id' => (int) $form_state['values']['add_rule']['select_group'],
-      ))
-      ->condition('id', (int) $form_state['values']['edit_flag'])
-      ->execute();
-
-    if ($edit_rule) {
-      backdrop_set_message(t('Your association rule has been edited.'));
-    }
-  }
-  else {
-    $add_rule = db_insert('civicrm_group_nodes_rules')->fields(array(
-      'role_name' => $form_state['values']['add_rule']['select_role'],
-      'group_id' => (int) $form_state['values']['add_rule']['select_group'],
-    ))->execute();
-
-    if ($add_rule) {
-      backdrop_set_message(t('Your association rule has been added.'));
-    }
-  }
-
-  $form_state['redirect'] = 'admin/config/civicrm/civicrm_group_nodes';
-}
-
-/**
- * Helper function to add and remove users from groups, use after user_save to remove roles $roles = $edit['roles'] for user_save
- *
- * @param object $account
- *   Backdrop user object
- * @param array $roles
- *   list of role to add/remove
+ * @param int $contact_id
+ *   CiviCRM Contact ID
+ * @param array|NULL $groups
+ *   list of CiviCRM group IDs to add/remove, or NULL to add/remove from all groups
  * @param string $op
  *   either add or remove
  */
-function civicrm_group_nodes_add_remove_groups($account, $roles, $op) {
+function civicrm_group_nodes_adjust_contact_groups($contact_id, $groups, $op) {
   if (!civicrm_initialize()) {
     return;
   }
 
   if ($op == 'add') {
     $txt = 'added';
+    $group_status = 'Added';
   }
   elseif ($op == 'remove') {
     $txt = 'removed';
+    $group_status = 'Removed';
   }
   else {
     return;
   }
   $debug_mode = FALSE;
 
-  // make sure user has other roles other than authenticated
-  if ($roles) {
-    //find the contact record
-    $params = array(
-      'version' => 3,
-      'sequential' => 1,
-      'return' => 'contact_id',
-      'uf_id' => $account->uid,
-    );
-    $contact = civicrm_api('UFMatch', 'get', $params);
-
-    if (!empty($contact['values']) && !CRM_Utils_Array::value('is_error', $contact) && is_numeric($contact['values'][0]['contact_id'])) {
-      $contact_id = CRM_Utils_Array::value('contact_id', $contact['values'][0]);
-
-      //loop over user's roles
-      foreach ($roles as $role) {
-
-        // Find the group(s) for the role
-        $result = db_select('civicrm_group_nodes_rules', 'cgr')->fields('cgr', array('group_id'))->condition('role_name', $role)->execute()->fetchAll();
-        $groups = _civicrm_group_nodes_validate_groups($result);
-        foreach ($groups as $group) {
-          //add the contact
-          $gparams = array('version' => 3, 'group_id' => $group->group_id, 'contact_id' => $contact_id);
-          if ($op == 'add') {
-            $result = civicrm_api('GroupContact', 'create', $gparams);
-          }
-          else {
-            $result = civicrm_api('GroupContact', 'delete', $gparams);
-          }
-
-          if ($result['is_error'] > 0) {
-            watchdog('civicrm_group_nodes', 'Error: Unable to sync role @role', array('@role' => $role), WATCHDOG_ERROR);
-            if ($debug_mode) {
-              backdrop_set_message(t('Error: Unable to sync role %role', array('%role' => $role)));
-            }
-          }
-          elseif ($debug_mode && $result['values'][$txt] > 0) {
-            backdrop_set_message("$txt user $account->name Group: $role");
-            backdrop_set_message(var_export($result, TRUE));
-          }
-          elseif ($debug_mode) {
-            backdrop_set_message("User $account->name NOT $txt Group: $role");
-            backdrop_set_message(var_export($result, TRUE));
-          }
-        } //end foreach
-      } //end foreach
-
-    }
-    //end if contact_id
-
-    else {
-      watchdog('civicrm_group_nodes', 'CiviCRM contact not found for Backdrop user ID @id', array('@id' => $user->uid), WATCHDOG_ERROR);
-      if ($debug_mode) {
-        backdrop_set_message(t('CiviCRM contact not found for Backdrop user ID @id', array('@id' => $user->uid)));
-      }
-    }
-
-  } //endif $roles
+  if (count($groups)) {
+    $result = civicrm_api3('GroupContact', 'create', [
+      'group_id' => $groups,
+      'contact_id' => $contact_id,
+      'status' => $group_status,
+    ]);
+  }
+  else if ($groups == NULL) {
+    
+  }
 }
 
 /**
- * Manual sync form. Provides a submit button to manually sync groups to roles.
+ * Manual sync form. Provides a submit button to manually sync groups to nodes.
  *
  * @ingroup forms
  * @see civicrm_group_nodes_manual_sync_submit()
@@ -648,12 +450,13 @@ function civicrm_group_nodes_manual_sync() {
   $form['manual_sync'] = array(
     '#type' => 'fieldset',
     '#title' => t('Manual Synchronization'),
-    '#description' => t('Manually synchronize CiviCRM group membership and Backdrop roles according to the current association rules. This process may take a long time.'),
+    '#description' => t('Manually synchronize CiviCRM group membership and Backdrop nodes according to the current association rules. This process may take a long time.'),
   );
   $form['manual_sync']['manual_sync_submit'] = array(
     '#type' => 'submit',
     '#value' => t('Synchronize now'),
   );
+  //$form['manual_sync']['#markup'] =  civicrm_group_nodes_add_node(939, 'business');
 
   return $form;
 }
@@ -672,12 +475,14 @@ function civicrm_group_nodes_manual_sync_submit($form, &$form_state) {
 }
 
 /**
- * Batch functions to manually update large number of users
+ * Batch functions to manually update large number of nodes.
+ *
+ * See civicrm_group_nodes_batch_worker().
  */
 function civicrm_group_nodes_batch_init() {
 
   $batch = array(
-    'title' => t('Updating Users...'),
+    'title' => t('Updating Nodes...'),
     'operations' => array(),
     'init_message' => t('Starting Update'),
     'progress_message' => t('Processed @current out of @total.'),
@@ -686,37 +491,41 @@ function civicrm_group_nodes_batch_init() {
     'progressive' => FALSE,
   );
 
-  // Find all existing users
-  $result = db_query('SELECT uid FROM {users}');
-
-  foreach ($result as $record) {
-    $batch['operations'][] = array('civicrm_group_nodes_batch_worker', array($record->uid));
+  // Find all contact IDs in CiviCRM groups that should have published nodes.
+  //
+  // Get all groups from config.
+  $group_ids = civicrm_group_nodes_get_groups();
+  $processed_groups = array();
+  $contacts = array();
+  $groups = array();
+  foreach($group_ids as $group_id) {
+    if (empty($processed_groups[$group_id])) {
+      // Get all contacts in this group.
+      $contacts_in_group = civicrm_group_nodes_get_group_contacts($group_id);
+      foreach ($contacts_in_group as $contact_in_group) {
+        $contacts[$contact_in_group['contact_id']] = $contact_in_group['contact_id'];
+      }
+    }
+    $processed_groups[$group_id] = TRUE;
   }
-
+  foreach ($contacts as $contact_id) {
+    // Add an operation to create a node for this contact
+    $batch['operations'][] = array('civicrm_group_nodes_batch_worker', array($contact_id));
+  }
   batch_set($batch);
-
   batch_process('admin/config/civicrm/civicrm_group_nodes');
 }
 
-function civicrm_group_nodes_batch_worker($uid, &$context) {
+/**
+  * Callback used in civicrm_group_nodes_batch_init().
+  *
+  */
+function civicrm_group_nodes_batch_worker(int $contact_id, &$context) {
   if (!civicrm_initialize()) {
     return;
   }
-
-  $account = user_load($uid);
-
-  if ($account !== FALSE) {
-
-    $roles = array_diff($account->roles, array(BACKDROP_ANONYMOUS_ROLE, BACKDROP_AUTHENTICATED_ROLE));
-
-    // Add user to groups
-    if ($roles) {
-      civicrm_group_nodes_add_remove_groups($account, $roles, 'add');
-    }
-
-    // Add roles to user
-    civicrm_group_nodes_sync_roles($account);
-  }
+  // Sync content status for contact depending on status in CiviCRM group
+  civicrm_group_nodes_sync_nodes($contact_id);
 
   if (empty($context['results'])) {
     $context['results']['processed'] = 0;
@@ -726,7 +535,7 @@ function civicrm_group_nodes_batch_worker($uid, &$context) {
 
 function civicrm_group_nodes_batch_finished($success, $results, $operations) {
   if ($success) {
-    $message = format_plural($results['processed'], 'One user processed.', '@count users processed.');
+    $message = format_plural($results['processed'], 'One node processed.', '@count nodes processed.');
   }
   else {
     $message = 'some errors';
@@ -736,16 +545,16 @@ function civicrm_group_nodes_batch_finished($success, $results, $operations) {
 }
 
 /**
- * Filters invalid groups out of a civicrm_group_nodes_rules query result
+ * Filters invalid groups out of a civicrm_group_nodes_rules query result.
+ * For example, deleted groups and smart groups (so we don't try to add contacts
+ * statically to a smart group).
  *
- * @param array $groups Result of a Backdrop Query::execute() against
- *                      civicrm_group_nodes_rules - An array of stdClass objects
- *                      having a group_id property
+ * @param array $groups Result of a civicrm_group_nodes_get_groups() - 
+ *                      An array of group_id values
  * @return array
  */
 function _civicrm_group_nodes_validate_groups(array $groups) {
-  foreach ($groups as $key => $group) {
-    $groupId = $group->group_id;
+  foreach ($groups as $key => $groupId) {
     $group_result = civicrm_api('Group', 'get', array(
       'group_id' => $groupId,
       'sequential' => 1,
@@ -763,8 +572,8 @@ function _civicrm_group_nodes_validate_groups(array $groups) {
 
     // CRM-11161: Exclude smart groups as we don't want to add contacts statically to a smart group
     if (CRM_Utils_Array::value('saved_search_id', $group_result['values'][0])) {
-      if (config_get('civicrm_group_nodes.settings', 'civicrm_group_nodes_debugging') !== NULL) {
-        $msg = 'Group ID @groupId is a smart group, so the user was not added to it statically.';
+      if (civicrm_group_nodes_debugmode() !== NULL) {
+        $msg = 'Group ID @groupId is a smart group, so the contact was not added to it statically.';
         $variables = array('@groupId' => $groupId);
         watchdog('civicrm_group_nodes', $msg, $variables, WATCHDOG_INFO);
       }
@@ -776,84 +585,100 @@ function _civicrm_group_nodes_validate_groups(array $groups) {
 }
 
 /**
- * Helper function to add and remove roles from a user depending on the groups
- * they are a member of
+ * Helper function to add/publish and unpublish nodes for a contact depending on
+ * the groups they are a member of.
  *
- * @param $account object The user account being processed
+ * @param int $contact_id The CiviCRM ID for the contact being processed.
  */
-function civicrm_group_nodes_sync_roles($account) {
+function civicrm_group_nodes_sync_nodes(int $contact_id) {
   if (!civicrm_initialize()) {
     return;
   }
 
-  require_once 'api/api.php';
-  require_once 'CRM/Core/BAO/UFMatch.php';
+  $groups = civicrm_group_nodes_get_groups();
+  foreach ($groups as $group) {
+    $contact_is_in_group = civicrm_group_nodes_check_group_contact($group, $contact_id);
+    $content_types = civicrm_group_nodes_get_content_types($group);
+    foreach($content_types as $content_type) {
+      if ($contact_is_in_group) {
+        civicrm_group_nodes_add_node($contact_id, $content_type);
+        if (civicrm_group_nodes_debugmode()) {
+          $message = 'Content of type @type should be published for contact @contact because they are in group @group.';
+          $params = array(
+            '@type' => $content_type,
+            '@contact' => $contact_id,
+            '@group' => $group,
+          );
+          watchdog('civicrm_group_nodes', $message, $params, WATCHDOG_INFO);
+        }
+      }
+      else {
+        civicrm_group_nodes_unpub_node($contact_id, $content_type);
+        if (civicrm_group_nodes_debugmode()) {
+          $message = 'Content of type @type should be unpublished for contact @contact because they are not in group @group.';
+          $params = array(
+            '@type' => $content_type,
+            '@contact' => $contact_id,
+            '@group' => $group,
+          );
+          watchdog('civicrm_group_nodes', $message, $params, WATCHDOG_INFO);
+        }
+      }
+    }
+  }
+}
 
-  //find the contact record
-  $contact = CRM_Core_BAO_UFMatch::getContactId($account->uid);
-  if (!$contact) {
+/**
+  * Helper function to check if a contact is in a specific group.
+  *
+  * @param int $group_id The CiviCRM Group ID to check.
+  * @param int $contact_id The CiviCRM ID for the contact to check.
+  *
+  * @return bool TRUE if contact is in the group, otherwise FALSE.
+  */
+function civicrm_group_nodes_check_group_contact(int $group_id, int $contact_id) {
+  if (!civicrm_initialize()) {
     return;
   }
-
-  // To account for the case of smart groups, we grab *all* the rules,
-  // and look for this contact in a list of group members
-  // CRM-11161
-  $query = db_select('civicrm_group_nodes_rules', 'cgr');
-  $query->fields('cgr', array('role_name', 'group_id'));
-
-  // Determine which group-role-sync'd roles the user should have.
-  // Assemble a  list of sync'd roles that the user currently has, in $currentSyncedRoles
-  // and a list of sync'd roles that the user should have, in $correctSyncedRoles.
-  $allCurrentRoleIDs = $account->roles;
-  $currentSyncedRoles = array();
-  $correctSyncedRoles = array();
-  $result = $query->execute();
-  foreach ($result as $group) {
-    if (in_array($group->role_name, $allCurrentRoleIDs)) {
-      $currentSyncedRoles[] = $group->role_name;
-    }
-    $params = array(
-      'filter.group_id' => $group->group_id,
-      'id' => $contact,
-      'version'  => 3,
-    );
-    $contacts = civicrm_api('contact', 'get', $params);
-    // If we found a user
-    if ($contacts['count'] > 0) {
-      $debugging = config_get('civicrm_group_nodes', 'civicrm_group_nodes_debugging');
-      if ($debugging) {
-        $message = 'Role @role should be held by user @user (@uid) because they are part of group @group (contactID: @cid)';
-        $params = array(
-          '@role' => $group->role_name,
-          '@user' => $account->name,
-          '@uid' => $account->uid,
-          '@group' => $group->group_id,
-          '@cid' => $contact,
-        );
-        watchdog('civicrm_group_nodes', $message, $params, WATCHDOG_INFO);
-      }
-      $correctSyncedRoles[] = $group->role_name;
-    }
+  // Based on CRM-11161: Don't use GroupContact since it doesn't work with 
+  // Smart Groups.
+  $result = civicrm_api3('Contact', 'get', [
+    'sequential' => 1,
+    'group' => $group_id,
+    'id' => $contact_id,
+  ]);
+  if ($result['count'] > 0) {
+    return TRUE;
   }
-
-  $rolesToAdd    = array_diff($correctSyncedRoles, $currentSyncedRoles);
-  $rolesToRemove = array_diff($currentSyncedRoles, $correctSyncedRoles);
-  $finalRoles = array_merge($account->roles, $rolesToAdd);
-  $finalRoles = array_diff($finalRoles, $rolesToRemove);
-  if (config_get('civicrm_group_nodes.settings', 'civicrm_group_nodes_debugging') !== NULL) {
-    $params = array(
-      '@initial' => print_r($account->roles, TRUE),
-      '@add' => print_r($rolesToAdd, TRUE),
-      '@remove' => print_r($rolesToRemove, TRUE),
-      '@final' => print_r($finalRoles, TRUE),
-    );
-    watchdog('civicrm_group_nodes', 'Initial roles: @initial, roles to add: @add, roles to remove: @remove, final roles: @final', $params, WATCHDOG_INFO);
+  else {
+    return FALSE;
   }
+}
 
-  if ($account->roles !== $finalRoles) {
-    $account->roles = $finalRoles;
-    $account->save();
+/**
+  * Helper function to return all contacts from a specific group.
+  *
+  * @param int $group_id The CiviCRM Group ID to check.
+  *
+  * @return array of CiviCRM contact IDs, or an empty array if none found.
+  */
+function civicrm_group_nodes_get_group_contacts(int $group_id) {
+  if (!civicrm_initialize()) {
+    return;
   }
+  // Based on CRM-11161: Don't use GroupContact since it doesn't work with 
+  // Smart Groups.
+  $result = civicrm_api3('Contact', 'get', [
+    'sequential' => 1,
+    'return' => ["id"],
+    'group' => $group_id,
+    'is_deleted' => 0,
+    'options' => ['limit' => 0],
+  ]);
+  if ($result['count'] > 0) {
+    return $result['values'];
+  }
+  return array();
 }
 
 /**
@@ -864,13 +689,60 @@ function civicrm_group_nodes_sync_roles($account) {
 function civicrm_group_nodes_settings($form, &$form_state) {
 
   $form['#config'] = 'civicrm_group_nodes.settings';
-  $form['civicrm_group_nodes_debugging'] = array(
+  $form['debugmode'] = array(
     '#type' => 'checkbox',
     '#title' => t('Enable detailed database logging'),
-    '#default_value' => config_get('civicrm_group_nodes.settings', 'civicrm_group_nodes_debugging'),
-    '#description' => 'Log the details of roles that are added and removed from users.',
+    '#default_value' => civicrm_group_nodes_debugmode(),
+    '#description' => 'Log the details of nodes that are added, published, or unpublished for contacts.',
   );
 
   // Default handler to save form configuration
   return system_settings_form($form);
+}
+
+/*
+  * Helper function to pull CiviCRM groups that are associated with a rule.
+  * If no Backdrop content type is specified it will return all groups,
+  * otherwise only those associated with the content type provided.
+  *
+  * @param string $content_type The content type to get group rules for. If
+  *                              empty, all group rules will be returned.
+  * @param bool $validate_groups Whether to validate groups that are returned
+  *                              (ie. check for deleted groups and filter out
+  *                              smart groups.
+  *
+  */
+function civicrm_group_nodes_get_groups (string $content_type = '', $validate_groups = FALSE) {
+  $groups = array();
+  $rules = config_get('civicrm_group_nodes.rules');
+  foreach($rules as $rule) {
+    if (empty($content_type) || $content_type == $rule['content_type']) {
+      $groups[] = $rule['group'];
+    }
+  }
+  if ($validate_groups) {
+    $groups = _civicrm_group_nodes_validate_groups($groups);
+  }
+  return $groups;
+}
+
+/*
+  * Helper function to pull Backdrop content types that are associated with a rule.
+  * If no CiviCRM group ID is specified it will return all used content types,
+  * otherwise only those associated with the group ID provided.
+  *
+  */
+function civicrm_group_nodes_get_content_types (int $group_id = 0) {
+  $content_types = array();
+  $rules = config_get('civicrm_group_nodes.rules');
+  foreach($rules as $rule) {
+    if ((!$group_id) || $group_id == $rule['group']) {
+      $content_types[] = $rule['content_type'];
+    }
+  }
+  return $content_types;
+}
+
+function civicrm_group_nodes_debugmode () {
+  return config_get('civicrm_group_nodes.settings', 'debugmode');
 }

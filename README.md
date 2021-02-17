@@ -5,6 +5,8 @@ CiviCRM Groups based on rules defined by the administrator.
 
 This will allow a variety of references between Backdrop functionality and
 CiviCRM contacts via this relationship. For example:
+ - Automatic landing pages with friendly URLs for CiviCRM Contacts (through
+   the referenced node).
  - Enabling Backdrop comments on a contact node.
  - Allowing Backdrop fields (such as Term References or any other) to be 
    associated with a CiviCRM contact.
@@ -13,16 +15,19 @@ CiviCRM contacts via this relationship. For example:
 
 ## Dependencies
  - CiviCRM
+ - CiviCRM Contact Reference Field *(comes with CiviCRM core)*
+ - Entity Plus
+ - Preset
 
-## Installation
+## Installation and Usage
 
-- Install this module using the official Backdrop CMS instructions at
-  https://backdropcms.org/guide/modules
+- Install this module using the [official Backdrop CMS instructions](https://backdropcms.org/guide/modules)
+- Usage instructions can be [viewed and edited in the Wiki](https://github.com/backdrop-contrib/civicrm_group_nodes/wiki).
 
 ## Issues
 
 Bugs and Feature requests should be reported in the 
-[Issue Queue](https://github.com/laryn/civicrm_group_nodes/issues)
+[Issue Queue](https://github.com/backdrop-contrib/civicrm_group_nodes/issues)
 
 ## Current Maintainers
 

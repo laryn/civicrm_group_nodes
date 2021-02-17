@@ -1,4 +1,4 @@
-name = CiviGroup Nodes Sync
+name = CiviCRM Group Nodes
 description = Sync Backdrop Nodes and contacts in CiviCRM Groups.
 backdrop = 1.x
 type = module
@@ -6,3 +6,6 @@ package = CiviCRM
 configure = admin/config/civicrm/civicrm_group_nodes
 
 dependencies[] = civicrm
+dependencies[] = civicrm_contact_ref
+dependencies[] = entity_plus
+dependencies[] = preset
