@@ -4,7 +4,7 @@
  * @file
  * A simple module that syncs contacts in a group to Backdrop nodes.
  */
- 
+
 /**
  * Implements hook_config_info().
  */
@@ -43,44 +43,37 @@ function civicrm_group_nodes_preset_types() {
  * Implements hook_preset_form().
  */
 function civicrm_group_nodes_preset_form($preset_type, $id) {
- $form = array();
- $config = config('civicrm_group_nodes.' . $preset_type);
+  $form = array();
+  $config = config('civicrm_group_nodes.' . $preset_type . '.' . $id);
 
- // Get default values.
- $config_values = ($id) ? $config->get($id) : array();
+  // Get CiviCRM groups as options for checkboxes.
+  $group_options = array();
+  civicrm_initialize();
+  foreach ($groups as $group) {
+    $group_options[$group['id']] = $group['title'];
+  }
 
- // Get CiviCRM groups as options for checkboxes.
- $group_options = array();
- civicrm_initialize();
- $result = civicrm_api3('Group', 'get', [
-  'sequential' => 1,
-  'options' => ['limit' => 0],
- ]);
- foreach ($result['values'] as $group) {
-   $group_options[$group['id']] = $group['title'];
- }
- 
- if ($preset_type == 'rules') {
-   $form['group'] = array(
-     '#type' => 'select',
-     '#title' => t('CiviCRM Groups'),
-     '#description' => t('Select the CiviCRM group you would like to sync.'),
-     '#options' => $group_options,
-     '#default_value' => isset($config_values['group']) ? $config_values['group'] : array(),
-     '#required' => TRUE,
-   );
-   $form['content_type'] = array(
-     '#type' => 'select',
-     '#title' => t('Content type'),
-     '#description' => t('Select the content type you would like to sync. If needed, we will create a field to reference the CiviCRM contact.'),
-     '#options' => node_type_get_names(),
-     '#default_value' => isset($config_values['content_type']) ? $config_values['content_type'] : array(),
-     '#required' => TRUE,
-   );
- }
- $form['#submit'][] = 'civicrm_group_nodes_rules_submit';
+  if ($preset_type == 'rules') {
+    $form['group'] = array(
+      '#type' => 'select',
+      '#title' => t('CiviCRM Groups'),
+      '#description' => t('Select the CiviCRM group you would like to sync.'),
+      '#options' => $group_options,
+      '#default_value' => !empty($config->get('group')) ? intval($config->get('group')) : array(),
+      '#required' => TRUE,
+    );
+    $form['content_type'] = array(
+      '#type' => 'select',
+      '#title' => t('Content type'),
+      '#description' => t('Select the content type you would like to sync. If needed, we will create a field to reference the CiviCRM contact.'),
+      '#options' => node_type_get_names(),
+      '#default_value' => !empty($config->get('content_type')) ? $config->get('content_type') : array(),
+      '#required' => TRUE,
+    );
+  }
+  $form['#submit'][] = 'civicrm_group_nodes_rules_submit';
 
- return $form;
+  return $form;
 }
 
 /**
@@ -89,7 +82,6 @@ function civicrm_group_nodes_preset_form($preset_type, $id) {
  * Used to make sure the content type has a CiviCRM Contact Reference field
  * that we can use (and if not, to create one).
  */
-
 function civicrm_group_nodes_rules_submit($form, &$form_state) {
   $content_type = $form_state['values']['content_type'];
   $content_type_fields = field_info_instances('node', $content_type);
@@ -110,7 +102,7 @@ function civicrm_group_nodes_rules_submit($form, &$form_state) {
       'required'     => TRUE,
       'locked'     => TRUE,
       'widget'       => array(
-          'type'  => 'civicrm_contact_ref_autocomplete',
+        'type'  => 'civicrm_contact_ref_autocomplete',
       ),
     );
     field_create_instance($instance);
@@ -154,7 +146,8 @@ function civicrm_group_nodes_node_update($node) {
 /**
  * Implements hook_node_delete().
  *
- * When a node is deleted, remove the contact from CiviCRM groups according to rules.
+ * When a node is deleted, remove the contact from CiviCRM groups according to
+ * rules.
  */
 function civicrm_group_nodes_node_delete($node) {
   if (!civicrm_initialize()) {
@@ -216,8 +209,8 @@ function civicrm_group_nodes_civicrm_post($op, $objectName, $objectId, &$objectR
             civicrm_group_nodes_add_node($contact_id, $content_type);
           }
           else {
-            // Contact no longer belongs to group, unpublish corresponding node,
-            // but only if the contact is in no other groups that grant this node
+            // Contact no longer belongs to group: unpublish corresponding node,
+            // but only if they are in no other groups that grant this node.
             if (!civicrm_node_granted_by_other_group($contact_id, $content_type, $group_id)) {
               civicrm_group_nodes_unpub_node($contact_id, $content_type);
             }
@@ -240,8 +233,10 @@ function civicrm_group_nodes_civicrm_post($op, $objectName, $objectId, &$objectR
 /**
  * Helper function to add or publish a node for a given contact
  *
- * @param int $contact_id The CiviCRM id of the contact to modify
- * @param string $content_type The content type being added
+ * @param int $contact_id
+ *   The CiviCRM id of the contact to modify.
+ * @param string $content_type
+ *   The content type being added.
  */
 function civicrm_group_nodes_add_node($contact_id, $content_type) {
   $node = civicrm_group_nodes_get_node($contact_id, $content_type);
@@ -280,8 +275,10 @@ function civicrm_group_nodes_add_node($contact_id, $content_type) {
 /**
  * Helper function to unpublish a node for a given contact
  *
- * @param $contact_id The contact id of the node to modify
- * @param $content_type The content type of the node being removed
+ * @param $contact_id
+ *   The contact id of the node to modify
+ * @param $content_type
+ *   The content type of the node being removed
  */
 function civicrm_group_nodes_unpub_node($contact_id, $content_type) {
   $node = civicrm_group_nodes_get_node($contact_id, $content_type);
@@ -302,30 +299,32 @@ function civicrm_group_nodes_unpub_node($contact_id, $content_type) {
  * Helper function to retrieve a node for a given contact and content type.
  * Returns a node object or FALSE if no node exists.
  *
- * @param $contact_id The contact id of the node to modify
- * @param $content_type The content type of the node being removed
+ * @param $contact_id
+ *   The contact id of the node to modify
+ * @param $content_type
+ *   The content type of the node being removed
  */
 function civicrm_group_nodes_get_node($contact_id, $content_type) {
   // Check if a node exists for this contact and content type.
   $query = db_select('node', 'n');
   $query->join('field_data_civicrm_group_nodes_contact_ref', 'civicontact', 'civicontact.entity_id = n.nid');
-  $query->fields('n',array('title','nid'))
-    ->condition('n.type', $content_type,'=')
-    ->condition('civicontact.entity_type', 'node','=')
-    ->condition('civicontact.bundle', $content_type,'=')
-    ->condition('civicontact.civicrm_group_nodes_contact_ref_contact_id', $contact_id,'=')
+  $query->fields('n', array('title','nid'))
+    ->condition('n.type', $content_type, '=')
+    ->condition('civicontact.entity_type', 'node', '=')
+    ->condition('civicontact.bundle', $content_type, '=')
+    ->condition('civicontact.civicrm_group_nodes_contact_ref_contact_id', $contact_id, '=')
     ->orderBy('created', 'DESC')
-    ->range(0,1);
+    ->range(0, 1);
     $results = $query->execute();
-    
-    foreach ($results as $result) {
-      if ($result) {
-        return node_load($result->nid);
-      }
-      else {
-        return NULL;
-      }
+
+  foreach ($results as $result) {
+    if ($result) {
+      return node_load($result->nid);
     }
+    else {
+      return NULL;
+    }
+  }
 }
 
 /**
@@ -400,32 +399,29 @@ function civicrm_group_nodes_permission() {
 }
 
 /**
- * Helper function to add or remove a specific CiviCRM contact from groups. 
+ * Helper function to add or remove a specific CiviCRM contact from groups.
  *
  * @param int $contact_id
- *   CiviCRM Contact ID
+ *   * CiviCRM Contact ID.
  * @param array|NULL $groups
- *   list of CiviCRM group IDs to add/remove, or NULL to add/remove from all groups
+ *   * List of CiviCRM group IDs to add/remove, or NULL to add/remove from all groups.
  * @param string $op
- *   either add or remove
+ *   * Either "add" or "remove".
  */
-function civicrm_group_nodes_adjust_contact_groups($contact_id, $groups, $op) {
+function civicrm_group_nodes_adjust_contact_groups(int $contact_id, array $groups, string $op) {
   if (!civicrm_initialize()) {
     return;
   }
 
   if ($op == 'add') {
-    $txt = 'added';
     $group_status = 'Added';
   }
   elseif ($op == 'remove') {
-    $txt = 'removed';
     $group_status = 'Removed';
   }
   else {
     return;
   }
-  $debug_mode = FALSE;
 
   if (count($groups)) {
     $result = civicrm_api3('GroupContact', 'create', [
@@ -456,8 +452,6 @@ function civicrm_group_nodes_manual_sync() {
     '#type' => 'submit',
     '#value' => t('Synchronize now'),
   );
-  //$form['manual_sync']['#markup'] =  civicrm_group_nodes_add_node(939, 'business');
-
   return $form;
 }
 
@@ -492,13 +486,11 @@ function civicrm_group_nodes_batch_init() {
   );
 
   // Find all contact IDs in CiviCRM groups that should have published nodes.
-
   // Get all groups from config.
   $group_ids = civicrm_group_nodes_get_groups();
   $processed_groups = array();
   $contacts = array();
-  $groups = array();
-  foreach($group_ids as $group_id) {
+  foreach ($group_ids as $group_id) {
     if (empty($processed_groups[$group_id])) {
       // Get all contacts in this group.
       $contacts_in_group = civicrm_group_nodes_get_group_contacts($group_id);
@@ -509,29 +501,28 @@ function civicrm_group_nodes_batch_init() {
     $processed_groups[$group_id] = TRUE;
   }
 
-  // Find out if any contacts have been removed from groups but still have 
+  // Find out if any contacts have been removed from groups but still have
   // published nodes.
-  
   // Get all contact IDs from published nodes.
   $content_types = civicrm_group_nodes_get_content_types();
   foreach ($content_types as $content_type) {
     $query = db_select('node', 'n');
     $query->join('field_data_civicrm_group_nodes_contact_ref', 'civicontact', 'civicontact.entity_id = n.nid');
-    $query->fields('civicontact',array('civicrm_group_nodes_contact_ref_contact_id'))
-      ->condition('n.type', $content_type,'=')
-      ->condition('n.status', 1,'=')
-      ->condition('civicontact.entity_type', 'node','=')
-      ->condition('civicontact.bundle', $content_type,'=')
-      ->condition('civicontact.civicrm_group_nodes_contact_ref_contact_id', 0,'>')
+    $query->fields('civicontact', array('civicrm_group_nodes_contact_ref_contact_id'))
+      ->condition('n.type', $content_type, '=')
+      ->condition('n.status', 1, '=')
+      ->condition('civicontact.entity_type', 'node', '=')
+      ->condition('civicontact.bundle', $content_type, '=')
+      ->condition('civicontact.civicrm_group_nodes_contact_ref_contact_id', 0, '>')
       ->orderBy('created', 'DESC');
     $results = $query->execute();
     foreach ($results as $result) {
       $contacts[$result->civicrm_group_nodes_contact_ref_contact_id] = $result->civicrm_group_nodes_contact_ref_contact_id;
     }
   }
-  
+
   foreach ($contacts as $contact_id) {
-    // Add an operation to create a node for this contact
+    // Add an operation to create a node for this contact.
     $batch['operations'][] = array('civicrm_group_nodes_batch_worker', array($contact_id));
   }
 
@@ -547,7 +538,7 @@ function civicrm_group_nodes_batch_worker(int $contact_id, &$context) {
   if (!civicrm_initialize()) {
     return;
   }
-  // Sync content status for contact depending on status in CiviCRM group
+  // Sync content status for contact depending on status in CiviCRM group.
   civicrm_group_nodes_sync_nodes($contact_id);
 
   if (empty($context['results'])) {
@@ -556,6 +547,9 @@ function civicrm_group_nodes_batch_worker(int $contact_id, &$context) {
   $context['results']['processed']++;
 }
 
+/**
+ *
+ */
 function civicrm_group_nodes_batch_finished($success, $results, $operations) {
   if ($success) {
     $message = format_plural($results['processed'], 'One node processed.', '@count nodes processed.');
@@ -572,8 +566,9 @@ function civicrm_group_nodes_batch_finished($success, $results, $operations) {
  * For example, deleted groups and smart groups (so we don't try to add contacts
  * statically to a smart group).
  *
- * @param array $groups Result of a civicrm_group_nodes_get_groups() - 
- *                      An array of group_id values
+ * @param array $groups
+ *   Result of a civicrm_group_nodes_get_groups() -
+ *   An array of group_id values.
  * @return array
  */
 function _civicrm_group_nodes_validate_groups(array $groups) {
@@ -593,15 +588,17 @@ function _civicrm_group_nodes_validate_groups(array $groups) {
       continue;
     }
 
-    // CRM-11161: Exclude smart groups as we don't want to add contacts statically to a smart group
-    if (CRM_Utils_Array::value('saved_search_id', $group_result['values'][0])) {
-      if (civicrm_group_nodes_debugmode() !== NULL) {
-        $msg = 'Group ID @groupId is a smart group, so the contact was not added to it statically.';
-        $variables = array('@groupId' => $groupId);
-        watchdog('civicrm_group_nodes', $msg, $variables, WATCHDOG_INFO);
+    // CRM-11161: Exclude smart groups as we don't want to add contacts statically to a smart group.
+    foreach ($group_results as $group_result) {
+      if (!empty($group_result['saved_search_id'])) {
+        if (civicrm_group_nodes_debugmode() !== NULL) {
+          $msg = 'Group ID @groupId is a smart group, so the contact was not added to it statically.';
+          $variables = array('@groupId' => $groupId);
+          watchdog('civicrm_group_nodes', $msg, $variables, WATCHDOG_INFO);
+        }
+        unset($groups[$key]);
+        continue;
       }
-      unset($groups[$key]);
-      continue;
     }
   }
   return $groups;
@@ -611,7 +608,8 @@ function _civicrm_group_nodes_validate_groups(array $groups) {
  * Helper function to add/publish and unpublish nodes for a contact depending on
  * the groups they are a member of.
  *
- * @param int $contact_id The CiviCRM ID for the contact being processed.
+ * @param int $contact_id
+ *   The CiviCRM ID for the contact being processed.
  */
 function civicrm_group_nodes_sync_nodes(int $contact_id) {
   if (!civicrm_initialize()) {
@@ -622,9 +620,8 @@ function civicrm_group_nodes_sync_nodes(int $contact_id) {
   foreach ($groups as $group) {
     $contact_is_in_group = civicrm_group_nodes_check_group_contact($group, $contact_id);
     $content_types = civicrm_group_nodes_get_content_types($group);
-    foreach($content_types as $content_type) {
+    foreach ($content_types as $content_type) {
       if ($contact_is_in_group) {
-        civicrm_group_nodes_add_node($contact_id, $content_type);
         if (civicrm_group_nodes_debugmode()) {
           $message = 'Content of type @type should be published for contact @contact because they are in group @group.';
           $params = array(
@@ -633,10 +630,10 @@ function civicrm_group_nodes_sync_nodes(int $contact_id) {
             '@group' => $group,
           );
           watchdog('civicrm_group_nodes', $message, $params, WATCHDOG_INFO);
+          civicrm_group_nodes_add_node($contact_id, $content_type);
         }
       }
       else {
-        civicrm_group_nodes_unpub_node($contact_id, $content_type);
         if (civicrm_group_nodes_debugmode()) {
           $message = 'Content of type @type should be unpublished for contact @contact because they are not in group @group.';
           $params = array(
@@ -646,6 +643,7 @@ function civicrm_group_nodes_sync_nodes(int $contact_id) {
           );
           watchdog('civicrm_group_nodes', $message, $params, WATCHDOG_INFO);
         }
+        civicrm_group_nodes_unpub_node($contact_id, $content_type);
       }
     }
   }
@@ -654,8 +652,10 @@ function civicrm_group_nodes_sync_nodes(int $contact_id) {
 /**
   * Helper function to check if a contact is in a specific group.
   *
-  * @param int $group_id The CiviCRM Group ID to check.
-  * @param int $contact_id The CiviCRM ID for the contact to check.
+  * @param int $group_id
+ *   The CiviCRM Group ID to check.
+  * @param int $contact_id
+ *   The CiviCRM ID for the contact to check.
   *
   * @return bool TRUE if contact is in the group, otherwise FALSE.
   */
@@ -663,7 +663,7 @@ function civicrm_group_nodes_check_group_contact(int $group_id, int $contact_id)
   if (!civicrm_initialize()) {
     return;
   }
-  // Based on CRM-11161: Don't use GroupContact since it doesn't work with 
+  // Based on CRM-11161: Don't use GroupContact since it doesn't work with
   // Smart Groups.
   $result = civicrm_api3('Contact', 'get', [
     'sequential' => 1,
@@ -681,15 +681,16 @@ function civicrm_group_nodes_check_group_contact(int $group_id, int $contact_id)
 /**
   * Helper function to return all contacts from a specific group.
   *
-  * @param int $group_id The CiviCRM Group ID to check.
+  * @param int $group_id
+ *   The CiviCRM Group ID to check.
   *
-  * @return array of CiviCRM contact IDs, or an empty array if none found.
+  * @return Civi\Api4\Generic\Result of CiviCRM contact IDs, or an empty array if none found.
   */
 function civicrm_group_nodes_get_group_contacts(int $group_id) {
   if (!civicrm_initialize()) {
     return;
   }
-  // Based on CRM-11161: Don't use GroupContact since it doesn't work with 
+  // Based on CRM-11161: Don't use GroupContact since it doesn't work with
   // Smart Groups.
   $result = civicrm_api3('Contact', 'get', [
     'sequential' => 1,
@@ -719,23 +720,25 @@ function civicrm_group_nodes_settings($form, &$form_state) {
     '#description' => 'Log the details of nodes that are added, published, or unpublished for contacts.',
   );
 
-  // Default handler to save form configuration
+  // Default handler to save form configuration.
   return system_settings_form($form);
 }
 
-/*
-  * Helper function to pull CiviCRM groups that are associated with a rule.
-  * If no Backdrop content type is specified it will return all groups,
-  * otherwise only those associated with the content type provided.
-  *
-  * @param string $content_type The content type to get group rules for. If
-  *                              empty, all group rules will be returned.
-  * @param bool $validate_groups Whether to validate groups that are returned
-  *                              (ie. check for deleted groups and filter out
-  *                              smart groups.
-  *
-  */
-function civicrm_group_nodes_get_groups (string $content_type = '', $validate_groups = FALSE) {
+/**
+ *
+ * Helper function to pull CiviCRM groups that are associated with a rule.
+ * If no Backdrop content type is specified it will return all groups,
+ * otherwise only those associated with the content type provided.
+ *
+ * @param string $content_type
+ *   The content type to get group rules for. If empty, all group rules will be
+ *   returned.
+ * @param bool $validate_groups
+ *   Whether to validate groups that are returned (ie. check for deleted groups
+ *   and filter out smart groups.
+ *
+ */
+function civicrm_group_nodes_get_groups(string $content_type = '', $validate_groups = FALSE) {
   $groups = array();
   $rules = config_get('civicrm_group_nodes.rules');
   foreach($rules as $rule) {
@@ -749,12 +752,15 @@ function civicrm_group_nodes_get_groups (string $content_type = '', $validate_gr
   return $groups;
 }
 
-/*
-  * Helper function to pull Backdrop content types that are associated with a rule.
-  * If no CiviCRM group ID is specified it will return all used content types,
-  * otherwise only those associated with the group ID provided.
-  *
-  */
+/**
+ *
+ * Helper function to pull Backdrop content types that are associated with a
+ * rule.
+ *
+ * If no CiviCRM group ID is specified it will return all used content types,
+ * otherwise only those associated with the group ID provided.
+ *
+ */
 function civicrm_group_nodes_get_content_types (int $group_id = 0) {
   $content_types = array();
   $rules = config_get('civicrm_group_nodes.rules');
@@ -766,6 +772,9 @@ function civicrm_group_nodes_get_content_types (int $group_id = 0) {
   return $content_types;
 }
 
+/**
+ *
+ */
 function civicrm_group_nodes_debugmode () {
   return config_get('civicrm_group_nodes.settings', 'debugmode');
 }
