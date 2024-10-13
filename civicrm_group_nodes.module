@@ -51,6 +51,8 @@ function civicrm_group_nodes_preset_form($preset_type, $id) {
   // Get CiviCRM groups as options for checkboxes.
   $group_options = array();
   civicrm_initialize();
+  $groups = \Civi\Api4\Group::get(TRUE)
+    ->execute();
   foreach ($groups as $group) {
     $group_options[$group['id']] = $group['title'];
   }
@@ -201,12 +203,12 @@ function civicrm_group_nodes_civicrm_post($op, $objectName, $objectId, &$objectR
           // "Edit" denotes both rejoining or being deleted from a group,
           // need to check which to perform appropriate action.
           $rulesProcessed[$content_type] = $content_type;
-          $groups = civicrm_api3('GroupContact', 'get', [
-            'sequential' => 1,
-            'contact_id' => $contact_id,
-            'group_id' => $group_id,
-          ]);
-          if ($groups['count'] > 0) {
+          $groups = \Civi\Api4\GroupContact::get(TRUE)
+            ->addWhere('contact_id', '=', $contact_id)
+            ->addWhere('group_id', '=', $group_id)
+            ->setLimit(25)
+            ->execute();
+          if ($groups->rowCount > 0) {
             // Contact rejoined the group; recreate or publish node.
             civicrm_group_nodes_add_node($contact_id, $content_type);
           }
@@ -255,13 +257,14 @@ function civicrm_group_nodes_add_node($contact_id, $content_type) {
       'promote' => 0,
     ));
     $nodewrapper = entity_metadata_wrapper('node', $node);
-    $contact = civicrm_api3('Contact', 'get', [
-      'sequential' => 1,
-      'return' => ["display_name"],
-      'id' => $contact_id,
-    ]);
-    if (!$contact['is_error'] && $contact['count'] == 1) {
-      $nodewrapper->title->set($contact['values'][0]['display_name']);
+    $contacts = \Civi\Api4\Contact::get(TRUE)
+      ->addSelect('organization_name')
+      ->addWhere('contact_type', '=', 'Organization')
+      ->addWhere('id', '=', $contact_id)
+      ->setLimit(1)
+      ->execute();
+    foreach ($contacts as $contact) {
+      $nodewrapper->title->set($contact['organization_name']);
       $nodewrapper->civicrm_group_nodes_contact_ref->set($contact_id);
       $nodewrapper->save();
     }
@@ -338,16 +341,16 @@ function civicrm_node_granted_by_other_group($contact_id, $content_type, $group_
   }
 
   // Get all the groups this contact belongs to.
-  $result = civicrm_api3('GroupContact', 'get', [
-    'sequential' => 1,
-    'contact_id' => $contact_id,
-  ]);
+  $result = \Civi\Api4\GroupContact::get(TRUE)
+    ->addWhere('contact_id', '=', $contact_id)
+    ->setLimit(50)
+    ->execute();
   // If there was an error, don't do anything destructive.
   if ($result['is_error']) {
     return TRUE;
   }
   else {
-    if ($result['count'] == 0) {
+    if ($result->rowCount == 0) {
       // Contact is not in *any* other groups so unpublish the node.
       return FALSE;
     }
@@ -426,14 +429,16 @@ function civicrm_group_nodes_adjust_contact_groups(int $contact_id, array $group
   }
 
   if (count($groups)) {
-    $result = civicrm_api3('GroupContact', 'create', [
-      'group_id' => $groups,
-      'contact_id' => $contact_id,
-      'status' => $group_status,
-    ]);
-  }
-  else if ($groups == NULL) {
-    
+    foreach ($groups as $group_id) {
+      $in_group = civicrm_group_nodes_check_group_contact($group_id, $contact_id);
+      if (($op == 'add' && !$in_group) || ($op == 'remove' && $in_group)) {
+        $result = \Civi\Api4\GroupContact::create(TRUE)
+          ->addValue('group_id', intval($group_id))
+          ->addValue('contact_id', $contact_id)
+          ->addValue('status', $group_status)
+          ->execute();
+      }
+    }
   }
 }
 
@@ -497,7 +502,7 @@ function civicrm_group_nodes_batch_init() {
       // Get all contacts in this group.
       $contacts_in_group = civicrm_group_nodes_get_group_contacts($group_id);
       foreach ($contacts_in_group as $contact_in_group) {
-        $contacts[$contact_in_group['contact_id']] = $contact_in_group['contact_id'];
+        $contacts[$contact_in_group['id']] = $contact_in_group['id'];
       }
     }
     $processed_groups[$group_id] = TRUE;
@@ -543,7 +548,7 @@ function civicrm_group_nodes_batch_worker(int $contact_id, &$context) {
   // Sync content status for contact depending on status in CiviCRM group.
   civicrm_group_nodes_sync_nodes($contact_id);
 
-  if (empty($context['results'])) {
+  if (empty($context['results']['processed'])) {
     $context['results']['processed'] = 0;
   }
   $context['results']['processed']++;
@@ -575,14 +580,13 @@ function civicrm_group_nodes_batch_finished($success, $results, $operations) {
  */
 function _civicrm_group_nodes_validate_groups(array $groups) {
   foreach ($groups as $key => $groupId) {
-    $group_result = civicrm_api('Group', 'get', array(
-      'group_id' => $groupId,
-      'sequential' => 1,
-      'version' => 3,
-    ));
+    $group_results = \Civi\Api4\Group::get(TRUE)
+      ->addWhere('id', '=', $groupId)
+      ->setLimit(1)
+      ->execute();
 
-    // CRM-16033: Ensure the group hasn't been deleted
-    if ($group_result['count'] === 0) {
+    // CRM-16033: Ensure the group hasn't been deleted.
+    if ($group_results->rowCount === 0) {
       $msg = 'Error: Cannot add contact to nonexistent group (ID @groupId)';
       $variables = array('@groupId' => $groupId);
       watchdog('civicrm_group_nodes', $msg, $variables, WATCHDOG_ERROR);
@@ -667,12 +671,12 @@ function civicrm_group_nodes_check_group_contact(int $group_id, int $contact_id)
   }
   // Based on CRM-11161: Don't use GroupContact since it doesn't work with
   // Smart Groups.
-  $result = civicrm_api3('Contact', 'get', [
-    'sequential' => 1,
-    'group' => $group_id,
-    'id' => $contact_id,
-  ]);
-  if ($result['count'] > 0) {
+  $result = \Civi\Api4\Contact::get(TRUE)
+    ->addWhere('id', '=', $contact_id)
+    ->addWhere('groups', 'IN', [$group_id])
+    ->addWhere('is_deleted', '=', FALSE)
+    ->execute();
+  if ($result->rowCount > 0) {
     return TRUE;
   }
   else {
@@ -694,15 +698,13 @@ function civicrm_group_nodes_get_group_contacts(int $group_id) {
   }
   // Based on CRM-11161: Don't use GroupContact since it doesn't work with
   // Smart Groups.
-  $result = civicrm_api3('Contact', 'get', [
-    'sequential' => 1,
-    'return' => ["id"],
-    'group' => $group_id,
-    'is_deleted' => 0,
-    'options' => ['limit' => 0],
-  ]);
-  if ($result['count'] > 0) {
-    return $result['values'];
+  $result = \Civi\Api4\Contact::get(TRUE)
+    ->addSelect('id')
+    ->addWhere('groups', 'IN', [$group_id])
+    ->addWhere('is_deleted', '=', FALSE)
+    ->execute();
+  if ($result->rowCount > 0) {
+    return $result;
   }
   return array();
 }
