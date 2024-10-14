@@ -414,28 +414,25 @@ function civicrm_group_nodes_permission() {
  *   * Either "add" or "remove".
  */
 function civicrm_group_nodes_adjust_contact_groups(int $contact_id, array $groups, string $op) {
-  if (!civicrm_initialize()) {
-    return;
-  }
-
-  if ($op == 'add') {
-    $group_status = 'Added';
-  }
-  elseif ($op == 'remove') {
-    $group_status = 'Removed';
-  }
-  else {
+  if (!civicrm_initialize() || !in_array($op, array('add', 'remove'))) {
     return;
   }
 
   if (count($groups)) {
     foreach ($groups as $group_id) {
       $in_group = civicrm_group_nodes_check_group_contact($group_id, $contact_id);
-      if (($op == 'add' && !$in_group) || ($op == 'remove' && $in_group)) {
+      if ($op == 'add' && !$in_group) {
         $result = \Civi\Api4\GroupContact::create(TRUE)
           ->addValue('group_id', intval($group_id))
           ->addValue('contact_id', $contact_id)
-          ->addValue('status', $group_status)
+          ->addValue('status', 'Added')
+          ->execute();
+      }
+      elseif ($op == 'remove' && $in_group) {
+        $result = \Civi\Api4\GroupContact::update(TRUE)
+          ->addWhere('group_id', '=', intval($group_id))
+          ->addWhere('contact_id', '=', $contact_id)
+          ->addValue('status', 'Removed')
           ->execute();
       }
     }
